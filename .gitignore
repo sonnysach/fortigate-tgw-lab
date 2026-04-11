@@ -1,0 +1,11 @@
+# Terraform generated files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# Sensitive files — never commit these
+*.pem
+override.tf
+override.tf.json
