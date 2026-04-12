@@ -111,11 +111,19 @@ The mental model to remember: **the VPC attachment moves bytes, the Connect atta
 
 ## TGW Route Table Design
 
-| Route Table | Associated With | Routes |
-|-------------|----------------|--------|
-| **SDWAN RT** | Connect attachment | Static 0.0.0.0/0 → Inspection VPC |
-| **Spoke RT** | Spoke 1 + Spoke 2 VPC attachments | Static 0.0.0.0/0 → Inspection VPC |
-| **Firewall RT** | Inspection VPC attachment | Propagated: Spoke 1, Spoke 2, Connect (BGP) |
+| Route Table | Associated With (Ingress) | Destination | Next Hop Attachment | Route Type |
+|---|---|---|---|---|
+| **SDWAN RT** | Connect attachment | `0.0.0.0/0` | Inspection VPC attachment | Static |
+| **Spoke RT** | Spoke 1 + Spoke 2 VPC attachments | `0.0.0.0/0` | Inspection VPC attachment | Static |
+| **Firewall RT** | Inspection VPC attachment | `10.1.0.0/16` (Spoke 1) | Spoke 1 VPC attachment | Propagated |
+| **Firewall RT** | Inspection VPC attachment | `10.2.0.0/16` (Spoke 2) | Spoke 2 VPC attachment | Propagated |
+| **Firewall RT** | Inspection VPC attachment | `10.100.0.0/16` (DC, via BGP) | Connect attachment | Propagated |
+
+**How to read this table:** each row represents one routing decision. If traffic arrives on the attachment in the "Associated With" column and its destination matches the "Destination" column, TGW forwards it out the attachment in the "Next Hop Attachment" column. The "Route Type" column tells you whether the route was created manually (Static) or populated automatically by a propagation (Propagated) — propagated routes from BGP peers like the Connect attachment update dynamically as BGP advertisements change.
+
+**Why the Firewall RT has three rows but the others have one:** the SDWAN RT and Spoke RT each contain a single static default route (everything goes to inspection, full stop). The Firewall RT is the "smart" post-inspection table with one propagated route per reachable destination — two spokes plus the DC CIDR learned via BGP from the FortiGate. As you add more spokes or the FortiGate advertises more on-prem CIDRs, additional rows appear in the Firewall RT automatically without any Terraform changes.
+
+**A note on Terraform mechanics:** propagated routes do not have a next-hop you configure — Terraform declares a propagation (`aws_ec2_transit_gateway_route_table_propagation`) with an attachment ID and a route table ID, and TGW automatically installs the routes with that attachment as the next-hop. Static routes (`aws_ec2_transit_gateway_route`) do specify the next-hop explicitly via `transit_gateway_attachment_id`. Two different Terraform resources, same underlying concept. See the "Why Three Route Tables?" section above for the full conceptual model behind this design.
 
 ---
 
