@@ -127,6 +127,64 @@ The mental model to remember: **the VPC attachment moves bytes, the Connect atta
 
 ---
 
+## Packet Walk: Fake DC → Spoke 1 EC2
+
+To make the three-route-table design concrete, here's a packet walk for traffic from the fake-DC host (`10.100.0.50`) in the SDWAN VPC to a test EC2 (`10.1.0.50`) in Spoke 1. This is the north-south flow the customer cares about most, and it exercises all three route tables in a single request/response cycle.
+
+**At a glance:**
+```
+Forward: Fake DC → FortiGate → TGW → Inspection VPC (ANF) → TGW → Spoke 1 VPC → EC2
+Return:  EC2 → Spoke 1 VPC → TGW → Inspection VPC (ANF) → TGW → FortiGate → Fake DC
+```
+
+Note that TGW appears *twice* in each direction — once before inspection and once after. Each TGW traversal consults a different route table based on which attachment the packet arrived on, and that's what forces every packet through ANF without relying on host-level policy.
+
+<details>
+<summary><b>Click to expand the full packet walk</b></summary>
+
+### Forward path: `10.100.0.50` → `10.1.0.50`
+
+**Hop 1 — Fake-DC EC2 → FortiGate trust interface.** Standard host-to-gateway forwarding. The EC2 sends the packet out its default route; the SDWAN VPC subnet route table delivers it to the FortiGate's trust ENI. Nothing TGW-related yet.
+
+**Hop 2 — FortiGate → TGW via GRE.** The FortiGate looks up `10.1.0.50` and finds a BGP-learned route for `10.1.0.0/16` with next-hop `169.254.x.x` (the TGW Connect peer inner IP), outgoing interface = GRE tunnel. The FortiGate wraps the original packet (`10.100.0.50 → 10.1.0.50`) in a GRE header, adds an outer IP header from its transport ENI to the TGW Connect peer transport IP, and sends it out its trust interface. The VPC subnet route table delivers the GRE-wrapped packet to the TGW via the **SDWAN VPC attachment** (the transport attachment). TGW receives the GRE packet, decapsulates it, and treats the inner packet as having arrived on the **Connect attachment**.
+
+> **TGW decision #1:** Ingress = Connect attachment → associated with **SDWAN RT** → lookup `10.1.0.50` → matches `0.0.0.0/0` → next-hop = **Inspection VPC attachment**.
+
+**Hop 3 — TGW → Inspection VPC (appliance mode picks AZ).** TGW hands the packet (still `10.100.0.50 → 10.1.0.50`, no encapsulation) to the Inspection VPC attachment. Because appliance mode is enabled on this attachment, TGW hashes the 5-tuple symmetrically and deterministically picks an AZ — say AZ-A. The packet pops out of the TGW ENI in the Inspection VPC's TGW-attachment subnet in AZ-A.
+
+**Hop 4 — Inspection VPC subnet routing → ANF endpoint.** Pure VPC routing now, no TGW involvement. The TGW-attachment subnet's route table has `0.0.0.0/0` pointing at the AZ-A ANF endpoint. The packet is delivered to ANF, which matches it against the firewall policy, logs the flow to CloudWatch, and (assuming the policy allows it) passes it through unchanged.
+
+**Hop 5 — ANF → back to TGW.** The ANF endpoint subnet's route table has `0.0.0.0/0` pointing at the TGW attachment. The packet re-enters TGW — but this time on the **Inspection VPC attachment**, not the Connect attachment.
+
+> **TGW decision #2:** Ingress = Inspection VPC attachment → associated with **Firewall RT** → lookup `10.1.0.50` → matches propagated route `10.1.0.0/16` → next-hop = **Spoke 1 VPC attachment**.
+
+**Hop 6 — TGW → Spoke 1 → EC2.** TGW delivers the packet out its ENI in Spoke 1's TGW-attachment subnet. Spoke 1's VPC subnet route table forwards it to the test EC2 at `10.1.0.50`. Delivered.
+
+### Return path: `10.1.0.50` → `10.100.0.50`
+
+**Hop 7 — Spoke 1 EC2 → TGW.** The return packet leaves the EC2, Spoke 1's subnet route table sends it to the TGW via the Spoke 1 VPC attachment.
+
+> **TGW decision #3:** Ingress = Spoke 1 VPC attachment → associated with **Spoke RT** → lookup `10.100.0.50` → matches `0.0.0.0/0` → next-hop = **Inspection VPC attachment**.
+
+**Hop 8 — TGW → Inspection VPC (same AZ as forward path, thanks to appliance mode).** Appliance mode's symmetric hash ensures TGW picks AZ-A again — the same AZ the forward packet used — so the return packet hits the same ANF endpoint and matches the existing stateful flow. Without appliance mode, TGW could pick AZ-B here and ANF would drop the packet because it has no state for the flow.
+
+**Hop 9 — ANF inspects and returns to TGW.** Same hairpin as hops 4–5, in reverse. The packet comes back to TGW on the Inspection VPC attachment.
+
+> **TGW decision #4:** Ingress = Inspection VPC attachment → associated with **Firewall RT** → lookup `10.100.0.50` → matches propagated BGP route `10.100.0.0/16` → next-hop = **Connect attachment**.
+
+**Hop 10 — TGW → FortiGate via GRE → fake-DC EC2.** TGW wraps the packet in GRE and sends it out the Connect attachment back to the FortiGate's transport IP. The FortiGate decapsulates, does a route lookup on `10.100.0.50`, forwards it out the trust interface, and the fake-DC EC2 receives the reply.
+
+### What this walk demonstrates
+
+- **Every TGW traversal is a fresh decision.** The packet enters TGW four times total across the full request/response, and each entry consults a different route table based on the ingress attachment. Same packet, same destination, different forwarding outcome — that's policy-based routing in action.
+- **All three route tables fire in a single flow.** SDWAN RT on hop 2, Firewall RT on hop 5, Spoke RT on hop 7, Firewall RT again on hop 9. If any one of them is misconfigured, the flow breaks in a specific, identifiable way.
+- **Appliance mode is the glue that holds the stateful inspection together.** Without it, hops 3 and 8 would land on different AZ endpoints, the ANF in AZ-B would see a return packet with no forward state, and the flow would silently drop. This is the single most common production failure of this design.
+- **ANF inspects in both directions.** Every packet — forward *and* return — traverses ANF. That's what the customer's security team means by "all traffic inspected," and it's what the three-route-table design guarantees structurally rather than by policy.
+
+</details>
+
+---
+
 ## Step 0: Install the Tools
 
 You need two command-line tools: the **AWS CLI** (talks to your AWS account) and **Terraform** (reads the `.tf` files and creates the infrastructure).
