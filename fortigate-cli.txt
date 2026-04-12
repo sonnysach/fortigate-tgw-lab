@@ -86,9 +86,9 @@ config router bgp
   end
 end
 
-# ── Loopback for fake DC CIDR (so BGP has a route to advertise) ──────────
+# ── Loopback for simulated DC CIDR (so BGP has a route to advertise) ─────
 config system interface
-  edit "fake-dc-lo"
+  edit "sim-dc-lo"
     set type loopback
     set ip 10.100.0.1 255.255.0.0
     set allowaccess ping

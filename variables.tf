@@ -67,7 +67,7 @@ variable "spoke2_vpc_cidr" {
 }
 
 variable "fake_dc_cidr" {
-  description = "Fake on-prem DC CIDR advertised by FortiGate via BGP"
+  description = "Simulated on-prem DC CIDR advertised by FortiGate via BGP"
   type        = string
   default     = "10.100.0.0/16"
 }

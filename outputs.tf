@@ -81,14 +81,14 @@ output "spoke2_ssh_command" {
   value       = "ssh -i <key.pem> ec2-user@${aws_instance.spoke2_test.public_ip}"
 }
 
-output "fake_dc_private_ip" {
-  description = "Fake DC test EC2 private IP (in SDWAN trust subnet)"
+output "simulated_dc_private_ip" {
+  description = "Simulated DC test EC2 private IP (in SDWAN trust subnet)"
   value       = aws_instance.fake_dc.private_ip
 }
 
-output "fake_dc_note" {
-  description = "Fake DC has no public IP – SSH via FortiGate or spoke EC2 hop"
-  value       = "Reach fake-DC at ${aws_instance.fake_dc.private_ip} via FortiGate trust network"
+output "simulated_dc_note" {
+  description = "Simulated DC has no public IP – SSH via FortiGate or spoke EC2 hop"
+  value       = "Reach simulated DC at ${aws_instance.fake_dc.private_ip} via FortiGate trust network"
 }
 
 # ── Reminder ────────────────────────────────────────────────────────────────

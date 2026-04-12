@@ -14,9 +14,12 @@ This lab exists so that any Fortinet SE can stand up the full design in under 15
 
 ## What This Lab Builds
 
+![Packet Walk Animation](packet_walk.gif)
+*For a higher-resolution view, open [packet_walk.mp4](packet_walk.mp4) directly.*
+
 A minimal-but-complete version of the most common Fortinet-in-AWS hybrid design pattern:
 
-1. **A FortiGate-VM in a dedicated "SDWAN VPC"**, acting as the cloud-side SD-WAN hub. In a real deployment it would terminate IPsec tunnels from on-prem FortiGates at branches and data centers; here we fake the on-prem side with a test EC2 so we can focus on the AWS-side mechanics.
+1. **A FortiGate-VM in a dedicated "SDWAN VPC"**, acting as the cloud-side SD-WAN hub. In a real deployment it would terminate IPsec tunnels from on-prem FortiGates at branches and data centers; here we simulate the on-prem side with a test EC2 so we can focus on the AWS-side mechanics.
 
 2. **An AWS Transit Gateway with a Connect attachment to the FortiGate.** Connect attachments are AWS's purpose-built mechanism for letting third-party network appliances participate in TGW routing as a BGP peer via a GRE tunnel. This is how the FortiGate learns about AWS VPC CIDRs and advertises on-prem CIDRs back into AWS — exactly like a CE router in an MPLS L3VPN.
 
@@ -24,168 +27,124 @@ A minimal-but-complete version of the most common Fortinet-in-AWS hybrid design 
 
 4. **Two spoke VPCs with test EC2 instances**, to validate east-west traffic actually traverses ANF instead of short-cutting directly through the TGW.
 
-5. **A three-route-table TGW design** that enforces the "force everything through inspection" policy using ingress-attachment-based routing (the TGW equivalent of VRF + PBR). Two of the three route tables contain a single static default route each; the third is populated entirely by BGP propagation. The asymmetry between associations and propagations is what makes the design work, and understanding it is the main educational goal of the lab.
+5. **A three-route-table TGW design** that enforces the "force everything through inspection" policy using ingress-attachment-based routing (the TGW equivalent of VRF + PBR). Two of the three route tables contain a single static default route each; the third is populated entirely by BGP propagation.
 
-**What the lab is not:** a production-ready reference architecture. There's no HA FortiGate pair, no real on-prem IPsec tunnel, no ADVPN, no centralized egress, only two spokes instead of five, and the ANF policy is deliberately permissive so you can get pings flowing before you start locking things down. Every one of these simplifications was a deliberate trade-off to keep the lab cheap (~$12/day), fast to stand up, and focused on the two things that actually matter: (1) watching BGP come up between a FortiGate and a TGW Connect attachment, and (2) proving that multi-route-table TGW routing actually forces traffic through inspection. Once you understand those two things, scaling to the full customer design is mechanical.
+**What the lab is not:** a production-ready reference architecture. There's no HA FortiGate pair, no real on-prem IPsec tunnel, no ADVPN, no centralized egress, only two spokes instead of five, and the ANF policy is deliberately permissive so you can get pings flowing before you start locking things down. Every one of these simplifications was a deliberate trade-off to keep the lab cheap (~$12/day), fast to stand up, and focused on the two things that actually matter: (1) watching BGP come up between a FortiGate and a TGW Connect attachment, and (2) proving that multi-route-table TGW routing actually forces traffic through inspection.
 
 ## How It Works (At a Glance)
 
 1. **Terraform provisions the entire AWS environment** — four VPCs (SDWAN, Inspection, Spoke 1, Spoke 2), a Transit Gateway with three route tables, all attachments, the FortiGate-VM, AWS Network Firewall with a permissive starter policy, test EC2s, and a $50/month budget alert. Everything is in a single `terraform apply` so you can tear it all down just as easily with `terraform destroy`.
 
-2. **You SSH into the FortiGate once after deployment and paste in a GRE tunnel + BGP neighbor config** from `fortigate-cli.txt`. Terraform intentionally does not configure the FortiGate itself — this step is where you actually learn how the FortiGate talks to the TGW, and it's the single most important hands-on exercise in the lab. You'll watch the BGP session come up and routes populate the Firewall RT automatically via propagation.
+2. **You SSH into the FortiGate once after deployment and paste in a GRE tunnel + BGP neighbor config** from `fortigate-cli.txt`. Terraform intentionally does not configure the FortiGate itself — this step is where you actually learn how the FortiGate talks to the TGW, and it's the single most important hands-on exercise in the lab.
 
-3. **You validate the design by sending pings** between spoke test EC2s and between the fake DC host and the spokes, confirming via ANF flow logs that every packet was inspected. Then, for bonus learning, you deliberately break appliance mode on the Inspection VPC attachment and watch return traffic drop because of asymmetric AZ hashing — the single most common production failure mode of this design.
+3. **You validate the design by sending pings** between spoke test EC2s and between the simulated DC host and the spokes, confirming via ANF flow logs that every packet was inspected. Then you deliberately break appliance mode and watch return traffic drop — the single most common production failure mode of this design.
 
 4. **When you're done for the day, you destroy everything with one command.** No lingering resources, no surprise bills, nothing to clean up manually.
 
-The goal is that by the end of a single afternoon, you've built the design end-to-end, watched it work, watched it break in the characteristic ways, and can confidently walk a customer through both the architecture and the failure modes from direct experience.
+<details>
+<summary><b>Why the FortiGate Needs Two TGW Attachments</b></summary>
 
-### Why Three Route Tables? (The Core Concept)
+When you wire the FortiGate into the Transit Gateway, you create two attachments in a specific order:
 
-If you come from a traditional networking background, the fastest way to understand TGW is this: a TGW route table is a VRF, an association is an interface-to-VRF binding, and the whole multi-route-table design is just policy-based routing with a cloud paint job.
+1. **A standard VPC attachment** (the "transport" attachment) between the SDWAN VPC and the TGW. This is a normal TGW VPC attachment like the one every spoke has — ENIs in SDWAN VPC subnets, TGW on the other end, IP packets flowing between them.
 
-TGW's forwarding algorithm is two steps:
+2. **A Connect attachment layered on top of the VPC attachment.** The Connect attachment is a logical attachment — it doesn't have its own ENIs. Instead, it rides inside the transport VPC attachment as a GRE tunnel, with BGP running inside the GRE tunnel.
 
-1. **Which route table do I use?** Answered by the association of the attachment the packet arrived on. Every attachment is associated with exactly one route table, and that association determines which table TGW consults for ingress traffic on that attachment.
-2. **Where do I send it?** Answered by a longest-prefix-match on the destination IP in that table, which returns a next-hop attachment.
+You cannot create the Connect attachment first because it needs the VPC attachment to ride on. That's why Terraform creates them in order: VPC attachment → Connect attachment → GRE peers → BGP.
 
-The powerful consequence: the same destination IP can be forwarded completely differently depending on which attachment it arrived on. A packet to `10.1.0.50` arriving on the Connect attachment hits the SDWAN RT and gets sent to Inspection. The exact same packet to `10.1.0.50` arriving on the Inspection attachment hits the Firewall RT and gets sent directly to Spoke 1. Same destination, different ingress, different outcome. That asymmetry is what makes service chaining through a central inspection point possible.
+Why two instead of one? Because they do completely different jobs:
 
-With that mental model in place, the three-table design almost writes itself:
+- **The VPC attachment is a data plane construct.** It gets GRE-encapsulated bytes from the FortiGate's ENI into the TGW. Think of it as a pipe.
+- **The Connect attachment is a control plane construct.** It's the BGP peer that the FortiGate talks to. It's what gets associated with the SDWAN RT and propagated into the Firewall RT. Think of it as the routing relationship.
 
-- **SDWAN RT** — associated with the Connect attachment. Its only job is "force everything coming from the FortiGate through inspection." One static default route to the Inspection VPC attachment. Nothing propagated.
-- **Spoke RT** — associated with both spoke VPC attachments. Its only job is "force everything coming from a spoke through inspection." One static default route to the Inspection VPC attachment. Nothing propagated. Critically, spoke CIDRs are deliberately not propagated into this table — if they were, longest-prefix-match would beat the default route and spoke-to-spoke traffic would bypass ANF entirely. Keeping this table empty is what enforces east-west inspection.
-- **Firewall RT** — associated with the Inspection VPC attachment. This is the only "smart" table in the design. After ANF inspects a packet and hands it back to TGW, the Firewall RT decides where it actually goes: to a spoke, or back out through the FortiGate to the DC. All routes in this table are populated via propagation — spoke CIDRs come from the spoke attachments, and the DC CIDR comes dynamically via BGP from the FortiGate over the Connect attachment. No static routes needed.
+The mental model: **the VPC attachment moves bytes, the Connect attachment moves routes.** You need both, and you create them in that order.
 
-The design pattern you should remember is **"dumb ingress tables + one smart post-inspection table."** Two tables with a single static default route each, and one table populated entirely by BGP propagation. The rule of thumb is: topology belongs in propagation, policy belongs in static routes. Spoke CIDRs and DC CIDRs are topology (learned from peers), so they're propagated. Default routes forcing traffic to inspection are policy (an enforcement decision you're making), so they're static.
-
-The same attachment often plays different roles in different tables. The spoke attachments are associated with the Spoke RT (ingress decisions) but propagated into the Firewall RT (egress destinations after inspection). Association and propagation are completely independent settings — an attachment can be propagated into tables it isn't associated with, and that's the normal case, not a special one.
-
-**One last critical piece: appliance mode.** Because the Inspection VPC has ANF endpoints in two AZs, both actively processing traffic, TGW needs to deterministically send the forward and return halves of every flow to the same AZ endpoint — otherwise ANF's stateful engine sees only half the flow and drops the return traffic. Appliance mode (enabled on the Inspection VPC's TGW attachment) uses a symmetric 5-tuple hash to guarantee this. It's the one setting in TGW that has no traditional-networking analog, because traditional routers don't have AZs. Appliance mode is OFF on every other attachment in this lab (spokes, SDWAN VPC) because those attachments don't have the multi-AZ stateful appliance problem. Forgetting appliance mode is the #1 cause of "worked in testing, silently broke in production" incidents with this design, which is why one of the validation exercises in this lab is to deliberately turn it off and watch traffic break.
-
-### Why the FortiGate Needs Two TGW Attachments
-
-When you wire the FortiGate into the Transit Gateway, you don't create one attachment — you create two, and they must be created in a specific order:
-
-1. **First, a standard VPC attachment** (sometimes called the "transport" attachment) between the SDWAN VPC and the TGW. This is a normal TGW VPC attachment like the one every spoke has. It's the physical path — ENIs in SDWAN VPC subnets, TGW on the other end, IP packets flowing between them.
-
-2. **Then, a Connect attachment layered on top of the VPC attachment.** The Connect attachment is a logical attachment — it doesn't have its own ENIs and doesn't carry packets by itself. Instead, it rides inside the transport VPC attachment as a GRE tunnel, with BGP running inside the GRE tunnel.
-
-You cannot create the Connect attachment first, because it needs an existing VPC attachment to ride on. AWS won't let you. That's why Terraform creates them in order: VPC attachment → Connect attachment → GRE peers → BGP.
-
-Why does AWS split it into two attachments instead of one? Because the two attachments do completely different jobs:
-
-- **The VPC attachment is a data plane construct.** Its job is to get GRE-encapsulated bytes from the FortiGate's ENI into the TGW. That's it. It doesn't participate in routing decisions — the SDWAN RT isn't even associated with it. Think of it as a pipe.
-- **The Connect attachment is a control plane construct.** Its job is to be the BGP peer that the FortiGate talks to. It's what gets associated with the SDWAN RT, and it's what gets propagated into the Firewall RT so BGP-learned DC routes show up automatically. Think of it as the routing relationship.
-
-This split is what makes TGW Connect useful. Without it, the only way to get a third-party appliance like a FortiGate into the TGW routing fabric would be with static routes — you'd have to manually tell TGW "to reach 10.100.0.0/16, send to the FortiGate's ENI," and update it every time the on-prem side changed. The Connect attachment replaces all of that with a real BGP session, so the FortiGate can dynamically advertise and withdraw routes the same way it would to any other BGP neighbor.
-
-The mental model to remember: **the VPC attachment moves bytes, the Connect attachment moves routes.** You need both, and you create them in that order because the Connect attachment rides inside the VPC attachment. When you configure TGW route tables, you'll work almost entirely with the Connect attachment — it's the one you associate and propagate. The VPC attachment just sits there doing its quiet transport job in the background, and you'll barely think about it again after deployment.
-
----
-
-## Architecture
-
-```
-                    ┌──────────────┐
-                    │  TGW (64512) │
-          ┌─────────┤              ├──────────┐
-          │  Connect │  3 Route    │ VPC      │
-          │  (GRE)  │  Tables     │ Attach   │
-          │         └──────┬───────┘          │
-          ▼                ▼                  ▼
-  ┌───────────────┐ ┌──────────────┐  ┌────────────┐
-  │ SDWAN VPC     │ │ Inspection   │  │ Spoke VPCs │
-  │ 10.10.0.0/16  │ │ VPC          │  │ 10.1.0.0/16│
-  │               │ │ 10.200.0.0/16│  │ 10.2.0.0/16│
-  │ ┌───────────┐ │ │ ┌──────────┐ │  │            │
-  │ │ FortiGate │ │ │ │ AWS NFW  │ │  │ test EC2s  │
-  │ │ (65000)   │ │ │ │ (ANF)    │ │  │            │
-  │ └───────────┘ │ │ └──────────┘ │  └────────────┘
-  │ ┌───────────┐ │ └──────────────┘
-  │ │ Fake DC   │ │
-  │ │ 10.100/16 │ │
-  │ └───────────┘ │
-  └───────────────┘
-```
-
-## TGW Route Table Design
-
-| Route Table | Associated With (Ingress) | Destination | Next Hop Attachment | Route Type |
-|---|---|---|---|---|
-| **SDWAN RT** | Connect attachment | `0.0.0.0/0` | Inspection VPC attachment | Static |
-| **Spoke RT** | Spoke 1 + Spoke 2 VPC attachments | `0.0.0.0/0` | Inspection VPC attachment | Static |
-| **Firewall RT** | Inspection VPC attachment | `10.1.0.0/16` (Spoke 1) | Spoke 1 VPC attachment | Propagated |
-| **Firewall RT** | Inspection VPC attachment | `10.2.0.0/16` (Spoke 2) | Spoke 2 VPC attachment | Propagated |
-| **Firewall RT** | Inspection VPC attachment | `10.100.0.0/16` (DC, via BGP) | Connect attachment | Propagated |
-
-**How to read this table:** each row represents one routing decision. If traffic arrives on the attachment in the "Associated With" column and its destination matches the "Destination" column, TGW forwards it out the attachment in the "Next Hop Attachment" column. The "Route Type" column tells you whether the route was created manually (Static) or populated automatically by a propagation (Propagated) — propagated routes from BGP peers like the Connect attachment update dynamically as BGP advertisements change.
-
-**Why the Firewall RT has three rows but the others have one:** the SDWAN RT and Spoke RT each contain a single static default route (everything goes to inspection, full stop). The Firewall RT is the "smart" post-inspection table with one propagated route per reachable destination — two spokes plus the DC CIDR learned via BGP from the FortiGate. As you add more spokes or the FortiGate advertises more on-prem CIDRs, additional rows appear in the Firewall RT automatically without any Terraform changes.
-
-**A note on Terraform mechanics:** propagated routes do not have a next-hop you configure — Terraform declares a propagation (`aws_ec2_transit_gateway_route_table_propagation`) with an attachment ID and a route table ID, and TGW automatically installs the routes with that attachment as the next-hop. Static routes (`aws_ec2_transit_gateway_route`) do specify the next-hop explicitly via `transit_gateway_attachment_id`. Two different Terraform resources, same underlying concept. See the "Why Three Route Tables?" section above for the full conceptual model behind this design.
-
----
-
-## Packet Walk: Fake DC → Spoke 1 EC2
-
-To make the three-route-table design concrete, here's a packet walk for traffic from the fake-DC host (`10.100.0.50`) in the SDWAN VPC to a test EC2 (`10.1.0.50`) in Spoke 1. This is the north-south flow the customer cares about most, and it exercises all three route tables in a single request/response cycle.
-
-**At a glance:**
-```
-Forward: Fake DC → FortiGate → TGW → Inspection VPC (ANF) → TGW → Spoke 1 VPC → EC2
-Return:  EC2 → Spoke 1 VPC → TGW → Inspection VPC (ANF) → TGW → FortiGate → Fake DC
-```
-
-Note that TGW appears *twice* in each direction — once before inspection and once after. Each TGW traversal consults a different route table based on which attachment the packet arrived on, and that's what forces every packet through ANF without relying on host-level policy.
+</details>
 
 <details>
-<summary><b>Click to expand the full packet walk</b></summary>
+<summary><b>Why Three Route Tables? (The Core Concept)</b></summary>
 
-### Forward path: `10.100.0.50` → `10.1.0.50`
+![Route Table Quiz Animation](route_tables.gif)
+*For a higher-resolution view, open [route_tables.mp4](route_tables.mp4) directly.*
 
-**Hop 1 — Fake-DC EC2 → FortiGate trust interface.** Standard host-to-gateway forwarding. The EC2 sends the packet out its default route; the SDWAN VPC subnet route table delivers it to the FortiGate's trust ENI. Nothing TGW-related yet.
+If you come from traditional networking, think of it this way: a TGW route table is a VRF, an association is an interface-to-VRF binding, and the whole design is just policy-based routing with a cloud paint job.
 
-**Hop 2 — FortiGate → TGW via GRE.** The FortiGate looks up `10.1.0.50` and finds a BGP-learned route for `10.1.0.0/16` with next-hop `169.254.x.x` (the TGW Connect peer inner IP), outgoing interface = GRE tunnel. The FortiGate wraps the original packet (`10.100.0.50 → 10.1.0.50`) in a GRE header, adds an outer IP header from its transport ENI to the TGW Connect peer transport IP, and sends it out its trust interface. The VPC subnet route table delivers the GRE-wrapped packet to the TGW via the **SDWAN VPC attachment** (the transport attachment). TGW receives the GRE packet, decapsulates it, and treats the inner packet as having arrived on the **Connect attachment**.
+TGW forwarding works in two steps:
 
-> **TGW decision #1:** Ingress = Connect attachment → associated with **SDWAN RT** → lookup `10.1.0.50` → matches `0.0.0.0/0` → next-hop = **Inspection VPC attachment**.
+1. **Which route table do I use?** Determined by the association of the attachment the packet arrived on.
+2. **Where do I send it?** Longest-prefix-match in that table returns a next-hop attachment.
 
-**Hop 3 — TGW → Inspection VPC (appliance mode picks AZ).** TGW hands the packet (still `10.100.0.50 → 10.1.0.50`, no encapsulation) to the Inspection VPC attachment. Because appliance mode is enabled on this attachment, TGW hashes the 5-tuple symmetrically and deterministically picks an AZ — say AZ-A. The packet pops out of the TGW ENI in the Inspection VPC's TGW-attachment subnet in AZ-A.
+The powerful consequence: the same destination IP gets forwarded completely differently depending on which attachment the packet arrived on. A packet to `10.1.0.50` arriving on the Connect attachment hits the SDWAN RT and gets sent to Inspection. The exact same destination arriving on the Inspection attachment hits the Firewall RT and goes directly to Spoke 1. That asymmetry is what makes service chaining through a central inspection point possible.
 
-**Hop 4 — Inspection VPC subnet routing → ANF endpoint.** Pure VPC routing now, no TGW involvement. The TGW-attachment subnet's route table has `0.0.0.0/0` pointing at the AZ-A ANF endpoint. The packet is delivered to ANF, which matches it against the firewall policy, logs the flow to CloudWatch, and (assuming the policy allows it) passes it through unchanged.
+The three tables:
 
-**Hop 5 — ANF → back to TGW.** The ANF endpoint subnet's route table has `0.0.0.0/0` pointing at the TGW attachment. The packet re-enters TGW — but this time on the **Inspection VPC attachment**, not the Connect attachment.
+- **SDWAN RT** — associated with the Connect attachment. One static default route to the Inspection VPC attachment. Everything from the FortiGate goes through inspection.
+- **Spoke RT** — associated with both spoke VPC attachments. One static default route to the Inspection VPC attachment. Spoke CIDRs are deliberately *not* propagated here — if they were, longest-prefix-match would beat the default and spoke-to-spoke traffic would bypass ANF.
+- **Firewall RT** — associated with the Inspection VPC attachment. This is the only "smart" table. After ANF inspects a packet, the Firewall RT decides where it goes: to a spoke (propagated routes) or back to the FortiGate (DC CIDR learned via BGP). No static routes needed.
 
-> **TGW decision #2:** Ingress = Inspection VPC attachment → associated with **Firewall RT** → lookup `10.1.0.50` → matches propagated route `10.1.0.0/16` → next-hop = **Spoke 1 VPC attachment**.
+The design pattern: **"dumb ingress tables + one smart post-inspection table."** Topology belongs in propagation, policy belongs in static routes.
 
-**Hop 6 — TGW → Spoke 1 → EC2.** TGW delivers the packet out its ENI in Spoke 1's TGW-attachment subnet. Spoke 1's VPC subnet route table forwards it to the test EC2 at `10.1.0.50`. Delivered.
+**Appliance mode** is the last critical piece. The Inspection VPC has ANF endpoints in two AZs, and TGW needs to send both halves of every flow to the same AZ endpoint — otherwise ANF's stateful engine drops the return traffic. Appliance mode (enabled on the Inspection VPC attachment only) uses a symmetric hash to guarantee this. Forgetting it is the #1 cause of "worked in testing, broke in production" incidents.
 
-### Return path: `10.1.0.50` → `10.100.0.50`
-
-**Hop 7 — Spoke 1 EC2 → TGW.** The return packet leaves the EC2, Spoke 1's subnet route table sends it to the TGW via the Spoke 1 VPC attachment.
-
-> **TGW decision #3:** Ingress = Spoke 1 VPC attachment → associated with **Spoke RT** → lookup `10.100.0.50` → matches `0.0.0.0/0` → next-hop = **Inspection VPC attachment**.
-
-**Hop 8 — TGW → Inspection VPC (same AZ as forward path, thanks to appliance mode).** Appliance mode's symmetric hash ensures TGW picks AZ-A again — the same AZ the forward packet used — so the return packet hits the same ANF endpoint and matches the existing stateful flow. Without appliance mode, TGW could pick AZ-B here and ANF would drop the packet because it has no state for the flow.
-
-**Hop 9 — ANF inspects and returns to TGW.** Same hairpin as hops 4–5, in reverse. The packet comes back to TGW on the Inspection VPC attachment.
-
-> **TGW decision #4:** Ingress = Inspection VPC attachment → associated with **Firewall RT** → lookup `10.100.0.50` → matches propagated BGP route `10.100.0.0/16` → next-hop = **Connect attachment**.
-
-**Hop 10 — TGW → FortiGate via GRE → fake-DC EC2.** TGW wraps the packet in GRE and sends it out the Connect attachment back to the FortiGate's transport IP. The FortiGate decapsulates, does a route lookup on `10.100.0.50`, forwards it out the trust interface, and the fake-DC EC2 receives the reply.
-
-### What this walk demonstrates
-
-- **Every TGW traversal is a fresh decision.** The packet enters TGW four times total across the full request/response, and each entry consults a different route table based on the ingress attachment. Same packet, same destination, different forwarding outcome — that's policy-based routing in action.
-- **All three route tables fire in a single flow.** SDWAN RT on hop 2, Firewall RT on hop 5, Spoke RT on hop 7, Firewall RT again on hop 9. If any one of them is misconfigured, the flow breaks in a specific, identifiable way.
-- **Appliance mode is the glue that holds the stateful inspection together.** Without it, hops 3 and 8 would land on different AZ endpoints, the ANF in AZ-B would see a return packet with no forward state, and the flow would silently drop. This is the single most common production failure of this design.
-- **ANF inspects in both directions.** Every packet — forward *and* return — traverses ANF. That's what the customer's security team means by "all traffic inspected," and it's what the three-route-table design guarantees structurally rather than by policy.
+**Terraform mechanics:** in the `.tf` files, propagated routes use `aws_ec2_transit_gateway_route_table_propagation` (TGW installs routes automatically), while static routes use `aws_ec2_transit_gateway_route` (you specify the next-hop explicitly). Two different resources, same underlying concept.
 
 </details>
 
 ---
 
-## Step 0: Install the Tools
+## Packet Walk: Simulated DC → Spoke 1 EC2
+
+This is the north-south flow the customer cares about most. Watch the animation above, then read the summary below.
+
+**The short version:**
+```
+Forward: Simulated DC → FortiGate → TGW (SDWAN RT) → ANF → TGW (Firewall RT) → Spoke 1 EC2
+Return:  Spoke 1 EC2 → TGW (Spoke RT) → ANF → TGW (Firewall RT) → FortiGate → Simulated DC
+```
+
+The packet enters TGW four times total across the full request/response. Each entry consults a different route table based on which attachment it arrived on — same packet, different forwarding outcome each time.
+
+<details>
+<summary><b>Expand the hop-by-hop detail</b></summary>
+
+### Forward path: `10.100.0.50` → `10.1.0.50`
+
+**Hop 1 — Simulated DC → FortiGate.** The EC2 sends the packet out its default route to the FortiGate's trust ENI. Nothing TGW-related yet.
+
+**Hop 2 — FortiGate → TGW via GRE.** The FortiGate wraps the packet in GRE and sends it through the SDWAN VPC attachment. TGW decapsulates and treats the inner packet as arriving on the **Connect attachment**.
+> **Route table:** SDWAN RT → `0.0.0.0/0` → Inspection VPC attachment.
+
+**Hop 3 — TGW → ANF.** Appliance mode hashes the flow to a specific AZ (say AZ-A). The packet lands in the Inspection VPC, hits the ANF endpoint, gets inspected and logged.
+
+**Hop 4 — ANF → TGW → Spoke 1.** ANF passes the packet back to TGW on the **Inspection VPC attachment**.
+> **Route table:** Firewall RT → `10.1.0.0/16` (propagated) → Spoke 1 VPC attachment.
+
+TGW delivers the packet to Spoke 1. The EC2 at `10.1.0.50` receives it.
+
+### Return path: `10.1.0.50` → `10.100.0.50`
+
+**Hop 5 — Spoke 1 → TGW.** The return packet enters TGW on the **Spoke 1 VPC attachment**.
+> **Route table:** Spoke RT → `0.0.0.0/0` → Inspection VPC attachment.
+
+**Hop 6 — TGW → ANF (same AZ).** Appliance mode's symmetric hash picks AZ-A again. ANF matches the existing stateful flow and passes the packet through.
+
+**Hop 7 — ANF → TGW → FortiGate → Simulated DC.** The packet re-enters TGW on the Inspection VPC attachment.
+> **Route table:** Firewall RT → `10.100.0.0/16` (propagated via BGP) → Connect attachment.
+
+TGW sends the packet via GRE back to the FortiGate, which decapsulates and forwards it to the Simulated DC EC2.
+
+### Key takeaways
+
+- **All three route tables fire in a single flow.** SDWAN RT, Firewall RT, Spoke RT, then Firewall RT again.
+- **Appliance mode is the glue.** Without it, the forward and return halves hit different AZ endpoints, ANF drops the return traffic, and the flow silently fails.
+- **ANF inspects both directions.** Every packet — forward and return — traverses ANF. The three-route-table design guarantees this structurally.
+
+</details>
+
+---
+
+<details>
+<summary><b>Step 0: Install the Tools</b></summary>
 
 You need two command-line tools: the **AWS CLI** (talks to your AWS account) and **Terraform** (reads the `.tf` files and creates the infrastructure).
 
@@ -220,9 +179,10 @@ terraform --version
 
 Both should print a version number. If either says "command not found", close and reopen your terminal.
 
----
+</details>
 
-## Step 1: Log In to AWS
+<details>
+<summary><b>Step 1: Log In to AWS</b></summary>
 
 Terraform needs AWS credentials to create resources. Choose whichever method matches your setup.
 
@@ -308,9 +268,10 @@ aws sts get-caller-identity
 
 You should see your account number and role/user. If you get an error, your credentials are expired or misconfigured — redo the login step above.
 
----
+</details>
 
-## Step 2: Create an EC2 Key Pair
+<details>
+<summary><b>Step 2: Create an EC2 Key Pair</b></summary>
 
 A key pair lets you SSH into the test EC2 instances. You only need to do this once.
 
@@ -332,9 +293,10 @@ chmod 400 lab-key.pem
 
 Keep this file safe — you'll need it to SSH into instances later. Don't share it or commit it to Git.
 
----
+</details>
 
-## Step 3: Subscribe to the FortiGate AMI in AWS Marketplace
+<details>
+<summary><b>Step 3: Subscribe to the FortiGate AMI in AWS Marketplace</b></summary>
 
 Terraform needs permission to launch the FortiGate AMI. This is a one-time step per AWS account.
 
@@ -344,9 +306,10 @@ Terraform needs permission to launch the FortiGate AMI. This is a one-time step 
 
 > **Note:** If your work account restricts Marketplace subscriptions, ask your AWS admin to approve it, or request a BYOL license from our internal team. Set `deploy_fortigate = false` in `terraform.tfvars` to deploy everything else while you wait.
 
----
+</details>
 
-## Step 4: Find Your Public IP
+<details>
+<summary><b>Step 4: Find Your Public IP</b></summary>
 
 The lab locks down SSH and management access to your IP address only. Run:
 
@@ -358,9 +321,10 @@ This prints your public IP (e.g., `203.0.113.42`). Write it down — you'll need
 
 > **Note:** If you're on VPN, this returns your VPN exit IP. That's fine — just be aware that if you disconnect from VPN, you'll lose access and will need to update the config with your new IP.
 
----
+</details>
 
-## Step 5: Edit terraform.tfvars
+<details>
+<summary><b>Step 5: Edit terraform.tfvars</b></summary>
 
 Open the file `terraform.tfvars` in any text editor and replace the three `CHANGE_ME` values:
 
@@ -380,9 +344,10 @@ budget_alert_email = "you@fortinet.com"
 
 Save the file.
 
----
+</details>
 
-## Step 6: Deploy the Lab
+<details>
+<summary><b>Step 6: Deploy the Lab</b></summary>
 
 Open your terminal, navigate to this folder, and run three commands:
 
@@ -404,7 +369,7 @@ You should see "Terraform has been successfully initialized!" in green.
 terraform plan
 ```
 
-Review the output. It will say something like "Plan: 45 to add, 0 to change, 0 to destroy." This tells you how many AWS resources Terraform will create.
+Review the output. It will say something like "Plan: 45 to add, 0 to change, 0 to destroy."
 
 **Apply** — this actually creates the resources in AWS:
 
@@ -422,9 +387,10 @@ To see all outputs including the FortiGate password:
 terraform output -json
 ```
 
----
+</details>
 
-## Step 7: Test Connectivity
+<details>
+<summary><b>Step 7: Test Connectivity</b></summary>
 
 Once deployed, SSH into the spoke test EC2s using the key you created:
 
@@ -440,15 +406,16 @@ From inside the spoke1 EC2, try pinging spoke2's private IP:
 ping 10.2.1.x
 ```
 
-If `deploy_fortigate = true` and you've configured BGP (Step 8), also try pinging the fake DC:
+If `deploy_fortigate = true` and you've configured BGP (Step 8), also try pinging the simulated DC:
 
 ```bash
 ping 10.100.0.1
 ```
 
----
+</details>
 
-## Step 8: Configure FortiGate GRE + BGP (only when deploy_fortigate = true)
+<details>
+<summary><b>Step 8: Configure FortiGate GRE + BGP (only when deploy_fortigate = true)</b></summary>
 
 This step is manual — Terraform sets up the EC2 instance but the GRE/BGP config needs to be pasted into the FortiGate CLI.
 
@@ -460,9 +427,10 @@ This step is manual — Terraform sets up the EC2 instance but the GRE/BGP confi
 6. Paste the commands into the FortiGate CLI
 7. Verify BGP is up: `get router info bgp summary`
 
----
+</details>
 
-## Step 9: Clean Up (IMPORTANT!)
+<details>
+<summary><b>Step 9: Clean Up (IMPORTANT!)</b></summary>
 
 This lab costs approximately **$12/day**. When you're done testing, tear everything down:
 
@@ -472,9 +440,12 @@ terraform destroy
 
 Type **yes** when prompted. This removes all AWS resources created by this config. Verify in the AWS Console (EC2, VPC, TGW sections) that everything is gone.
 
+</details>
+
 ---
 
-## Troubleshooting
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 **"command not found: terraform"** — Terraform isn't installed or isn't on your PATH. Reinstall per Step 0 and open a new terminal window.
 
@@ -488,6 +459,8 @@ Type **yes** when prompted. This removes all AWS resources created by this confi
 
 **Can't SSH into test EC2** — Check that your current public IP matches what's in `allowed_mgmt_cidrs`. If you switched networks or VPN, your IP changed. Update `terraform.tfvars` and run `terraform apply`.
 
+</details>
+
 ---
 
 ## Estimated Cost
@@ -498,7 +471,8 @@ Type **yes** when prompted. This removes all AWS resources created by this confi
 
 ---
 
-## File Reference
+<details>
+<summary><b>File Reference</b></summary>
 
 | File | What it does |
 |------|-------------|
@@ -508,8 +482,10 @@ Type **yes** when prompted. This removes all AWS resources created by this confi
 | `tgw.tf` | Creates the Transit Gateway, VPC attachments, Connect (GRE), and 3 route tables |
 | `fortigate.tf` | Creates the FortiGate-VM EC2 instance, network interfaces, and security groups |
 | `anf.tf` | Creates AWS Network Firewall with inspection policy and CloudWatch flow logs |
-| `test_instances.tf` | Creates t3.micro test EC2s in each spoke VPC and the fake-DC in SDWAN VPC |
+| `test_instances.tf` | Creates t3.micro test EC2s in each spoke VPC and the simulated DC in SDWAN VPC |
 | `budget.tf` | Creates a $50/month AWS Budget with email alerts |
 | `outputs.tf` | Displays IP addresses, SSH commands, and other info after deployment |
 | `terraform.tfvars` | **Your config file** — edit this with your key pair, IP, and email |
 | `fortigate-cli.txt` | GRE + BGP CLI commands to paste into the FortiGate after deployment |
+
+</details>

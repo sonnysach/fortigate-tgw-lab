@@ -1,5 +1,5 @@
 ##############################################################################
-# test_instances.tf – Test EC2s in spokes + fake-DC in SDWAN trust subnet
+# test_instances.tf – Test EC2s in spokes + simulated DC in SDWAN trust subnet
 ##############################################################################
 
 ###############################################################################
@@ -49,10 +49,10 @@ resource "aws_security_group" "test_ec2" {
   tags = { Name = "test-ec2-${each.key}-sg" }
 }
 
-# Fake-DC SG in SDWAN VPC trust subnet
+# Simulated DC SG in SDWAN VPC trust subnet
 resource "aws_security_group" "fake_dc" {
   name_prefix = "fake-dc-"
-  description = "Fake DC test EC2 in SDWAN trust subnet"
+  description = "Simulated DC test EC2 in SDWAN trust subnet"
   vpc_id      = aws_vpc.sdwan.id
 
   ingress {
@@ -86,7 +86,7 @@ resource "aws_security_group" "fake_dc" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "fake-dc-sg" }
+  tags = { Name = "sim-dc-sg" }
 }
 
 ###############################################################################
@@ -128,7 +128,7 @@ resource "aws_instance" "spoke2_test" {
 }
 
 ###############################################################################
-# Test EC2 – Fake DC (SDWAN trust subnet)
+# Test EC2 – Simulated DC (SDWAN trust subnet)
 ###############################################################################
 resource "aws_instance" "fake_dc" {
   ami                    = data.aws_ami.amazon_linux.id
@@ -138,5 +138,5 @@ resource "aws_instance" "fake_dc" {
   key_name               = var.key_pair_name
   user_data              = local.test_userdata
 
-  tags = { Name = "fake-dc-test-ec2" }
+  tags = { Name = "sim-dc-test-ec2" }
 }
