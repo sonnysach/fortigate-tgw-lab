@@ -59,6 +59,8 @@ Why two instead of one? Because they do completely different jobs:
 
 The mental model: **the VPC attachment moves bytes, the Connect attachment moves routes.** You need both, and you create them in that order.
 
+**Critical: you must propagate the Connect attachment into the TGW's Firewall RT.** The FortiGate learns DC routes from on-prem (over IPsec in production, or via a static loopback in this lab) and re-advertises them to the TGW over the BGP session running inside the Connect attachment. But BGP peering alone isn't enough — without propagating the Connect attachment into the TGW's Firewall RT, those advertised routes are never installed in the route table, and post-inspection return traffic to the data center silently black-holes. This is the step AWS admins most commonly miss because it's a manual click in the console (or a dedicated Terraform resource), not something that happens automatically when BGP comes up. The VPC (transport) attachment does not need to be propagated — it only carries GRE bytes, not routes.
+
 </details>
 
 <details>
