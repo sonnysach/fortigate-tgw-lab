@@ -63,6 +63,25 @@ The same attachment often plays different roles in different tables. The spoke a
 
 **One last critical piece: appliance mode.** Because the Inspection VPC has ANF endpoints in two AZs, both actively processing traffic, TGW needs to deterministically send the forward and return halves of every flow to the same AZ endpoint — otherwise ANF's stateful engine sees only half the flow and drops the return traffic. Appliance mode (enabled on the Inspection VPC's TGW attachment) uses a symmetric 5-tuple hash to guarantee this. It's the one setting in TGW that has no traditional-networking analog, because traditional routers don't have AZs. Appliance mode is OFF on every other attachment in this lab (spokes, SDWAN VPC) because those attachments don't have the multi-AZ stateful appliance problem. Forgetting appliance mode is the #1 cause of "worked in testing, silently broke in production" incidents with this design, which is why one of the validation exercises in this lab is to deliberately turn it off and watch traffic break.
 
+### Why the FortiGate Needs Two TGW Attachments
+
+When you wire the FortiGate into the Transit Gateway, you don't create one attachment — you create two, and they must be created in a specific order:
+
+1. **First, a standard VPC attachment** (sometimes called the "transport" attachment) between the SDWAN VPC and the TGW. This is a normal TGW VPC attachment like the one every spoke has. It's the physical path — ENIs in SDWAN VPC subnets, TGW on the other end, IP packets flowing between them.
+
+2. **Then, a Connect attachment layered on top of the VPC attachment.** The Connect attachment is a logical attachment — it doesn't have its own ENIs and doesn't carry packets by itself. Instead, it rides inside the transport VPC attachment as a GRE tunnel, with BGP running inside the GRE tunnel.
+
+You cannot create the Connect attachment first, because it needs an existing VPC attachment to ride on. AWS won't let you. That's why Terraform creates them in order: VPC attachment → Connect attachment → GRE peers → BGP.
+
+Why does AWS split it into two attachments instead of one? Because the two attachments do completely different jobs:
+
+- **The VPC attachment is a data plane construct.** Its job is to get GRE-encapsulated bytes from the FortiGate's ENI into the TGW. That's it. It doesn't participate in routing decisions — the SDWAN RT isn't even associated with it. Think of it as a pipe.
+- **The Connect attachment is a control plane construct.** Its job is to be the BGP peer that the FortiGate talks to. It's what gets associated with the SDWAN RT, and it's what gets propagated into the Firewall RT so BGP-learned DC routes show up automatically. Think of it as the routing relationship.
+
+This split is what makes TGW Connect useful. Without it, the only way to get a third-party appliance like a FortiGate into the TGW routing fabric would be with static routes — you'd have to manually tell TGW "to reach 10.100.0.0/16, send to the FortiGate's ENI," and update it every time the on-prem side changed. The Connect attachment replaces all of that with a real BGP session, so the FortiGate can dynamically advertise and withdraw routes the same way it would to any other BGP neighbor.
+
+The mental model to remember: **the VPC attachment moves bytes, the Connect attachment moves routes.** You need both, and you create them in that order because the Connect attachment rides inside the VPC attachment. When you configure TGW route tables, you'll work almost entirely with the Connect attachment — it's the one you associate and propagate. The VPC attachment just sits there doing its quiet transport job in the background, and you'll barely think about it again after deployment.
+
 ---
 
 ## Architecture
