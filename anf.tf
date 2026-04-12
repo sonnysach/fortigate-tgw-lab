@@ -80,6 +80,11 @@ resource "aws_networkfirewall_firewall_policy" "inspection" {
 
     stateful_rule_group_reference {
       resource_arn = aws_networkfirewall_rule_group.stateful_allow_lab.arn
+      priority     = 1
+    }
+
+    stateful_engine_options {
+      rule_order = "STRICT_ORDER"
     }
   }
 

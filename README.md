@@ -137,52 +137,91 @@ Both should print a version number. If either says "command not found", close an
 
 ---
 
-## Step 1: Log In to AWS via SSO
+## Step 1: Log In to AWS
 
-Our AWS account uses SSO with FortiAuthenticator. Run this one-time setup:
+Terraform needs AWS credentials to create resources. Choose whichever method matches your setup.
+
+### Option A: AWS IAM Identity Center (SSO) — most corporate accounts
+
+If your organization uses AWS SSO (IAM Identity Center), you need two pieces of information from your SSO portal. Log into your portal in a browser, then click on your account and look for **"Access keys"** or **"Command line or programmatic access"**. That page will show you:
+
+- **SSO start URL** (e.g. `https://mycompany.awsapps.com/start/#`)
+- **SSO region** (e.g. `us-west-2`)
+
+> **Important:** The SSO region is where your Identity Center lives, which is often *different* from the region where you'll deploy resources. Don't guess — copy it from the portal.
+
+Run the one-time setup:
 
 ```bash
 aws configure sso
 ```
 
-You'll be prompted for several values. Enter the following:
-
 | Prompt | Value |
 |--------|-------|
-| SSO session name | `fortinet` (or any name you like) |
-| SSO start URL | `https://aws-sso.corp.fortinet.com/` |
-| SSO region | `us-east-1` |
+| SSO session name | Any name you like (e.g. `my-sso`) |
+| SSO start URL | Copy from your portal (include the `/#` if shown) |
+| SSO region | Copy from your portal |
 | SSO registration scopes | Press **Enter** to accept the default |
 
-Your browser will open — sign in with FortiAuthenticator (MFA). After authenticating, return to the terminal. It will list the AWS accounts and roles available to you. Pick the account you want to use, then set:
+Your browser will open for authentication (MFA, etc.). After signing in, return to the terminal. It will list the AWS accounts and roles available to you. Pick the account you want to use, then set:
 
 | Prompt | Value |
 |--------|-------|
 | CLI default client Region | `us-east-1` |
 | CLI default output format | `json` |
-| CLI profile name | `fortinet-lab` (or any name you like) |
+| CLI profile name | Any name you like (e.g. `lab`) |
 
 From now on, log in before any Terraform session:
 
 ```bash
-aws sso login --profile fortinet-lab
+aws sso login --profile lab
 ```
 
-Then tell your terminal to use that profile for all subsequent commands:
+Then tell your terminal to use that profile:
 
 ```bash
-export AWS_PROFILE=fortinet-lab
+export AWS_PROFILE=lab
 ```
 
-> **Windows PowerShell users:** Use `$env:AWS_PROFILE = "fortinet-lab"` instead.
+> **Windows PowerShell users:** Use `$env:AWS_PROFILE = "lab"` instead.
 
-To verify it worked:
+### Option B: IAM access keys — personal accounts or non-SSO setups
+
+If you have a regular IAM user with an Access Key ID and Secret Access Key:
+
+```bash
+aws configure
+```
+
+| Prompt | Value |
+|--------|-------|
+| AWS Access Key ID | Your access key |
+| AWS Secret Access Key | Your secret key |
+| Default region name | `us-east-1` |
+| Default output format | `json` |
+
+### Option C: Temporary credentials from SSO portal
+
+If `aws configure sso` isn't working or you just want a quick way in, you can copy temporary credentials directly from your SSO portal. Log in, click your account, click **"Access keys"** or **"Command line or programmatic access"**, and choose **"Option 1: Set AWS environment variables"**. Copy-paste the three `export` lines into your terminal, then add the region:
+
+```bash
+export AWS_ACCESS_KEY_ID="paste_from_portal"
+export AWS_SECRET_ACCESS_KEY="paste_from_portal"
+export AWS_SESSION_TOKEN="paste_from_portal"
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+> **Note:** These credentials expire after a few hours. You'll need to repeat this step if your session times out.
+
+### Verify
+
+Whichever option you chose, verify it works:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-You should see your account number and role. If you get an error, try `aws sso login --profile fortinet-lab` again.
+You should see your account number and role/user. If you get an error, your credentials are expired or misconfigured — redo the login step above.
 
 ---
 
