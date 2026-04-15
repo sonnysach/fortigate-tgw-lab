@@ -1,10 +1,11 @@
 ##############################################################################
-# fortigate.tf – FortiGate-VM PAYG instance, ENIs, security groups
+# fortigate.tf - FortiGate-VM BYOL instance, ENIs, security groups
 # All resources gated by var.deploy_fortigate
+# License applied manually via GUI after boot (FortiFlex token)
 ##############################################################################
 
 ###############################################################################
-# Latest FortiGate PAYG AMI (FortiOS 7.4.x)
+# Latest FortiGate BYOL AMI (FortiOS 7.4.x)
 ###############################################################################
 data "aws_ami" "fortigate" {
   count       = var.deploy_fortigate ? 1 : 0
@@ -13,7 +14,7 @@ data "aws_ami" "fortigate" {
 
   filter {
     name   = "name"
-    values = ["FortiGate-VM64-AWSONDEMAND build*7.4*"]
+    values = ["FortiGate-VM64-AWS build*7.4*"]
   }
 
   filter {
@@ -42,7 +43,6 @@ resource "aws_security_group" "fortigate_untrust" {
   description = "FortiGate untrust / mgmt interface"
   vpc_id      = aws_vpc.sdwan.id
 
-  # HTTPS mgmt (8443)
   ingress {
     description = "HTTPS management"
     from_port   = 8443
@@ -51,7 +51,6 @@ resource "aws_security_group" "fortigate_untrust" {
     cidr_blocks = var.allowed_mgmt_cidrs
   }
 
-  # SSH mgmt (2222)
   ingress {
     description = "SSH management"
     from_port   = 2222
@@ -60,7 +59,6 @@ resource "aws_security_group" "fortigate_untrust" {
     cidr_blocks = var.allowed_mgmt_cidrs
   }
 
-  # IPsec / IKE (for future use)
   ingress {
     description = "IKE"
     from_port   = 500
@@ -74,6 +72,14 @@ resource "aws_security_group" "fortigate_untrust" {
     from_port   = 4500
     to_port     = 4500
     protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "ICMP from anywhere"
+    from_port   = -1
+    to_port     = -1
+    protocol    = "icmp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -91,10 +97,9 @@ resource "aws_security_group" "fortigate_untrust" {
 resource "aws_security_group" "fortigate_trust" {
   count       = var.deploy_fortigate ? 1 : 0
   name_prefix = "fgt-trust-"
-  description = "FortiGate trust interface – GRE/BGP/internal"
+  description = "FortiGate trust interface - GRE/BGP/internal"
   vpc_id      = aws_vpc.sdwan.id
 
-  # Allow all from 10.0.0.0/8 (lab internal)
   ingress {
     description = "RFC1918 internal"
     from_port   = 0
@@ -103,7 +108,6 @@ resource "aws_security_group" "fortigate_trust" {
     cidr_blocks = ["10.0.0.0/8"]
   }
 
-  # GRE (protocol 47) from TGW CIDR range
   ingress {
     description = "GRE from TGW"
     from_port   = 0
@@ -126,7 +130,7 @@ resource "aws_security_group" "fortigate_trust" {
 # Network Interfaces
 ###############################################################################
 
-# ENI 0 – untrust (public-facing, mgmt)
+# ENI 0 - untrust (public-facing, mgmt)
 resource "aws_network_interface" "fortigate_untrust" {
   count             = var.deploy_fortigate ? 1 : 0
   subnet_id         = aws_subnet.sdwan_untrust.id
@@ -135,7 +139,7 @@ resource "aws_network_interface" "fortigate_untrust" {
   tags              = { Name = "fgt-untrust-eni" }
 }
 
-# ENI 1 – trust (GRE tunnel endpoint, internal)
+# ENI 1 - trust (GRE tunnel endpoint, internal)
 resource "aws_network_interface" "fortigate_trust" {
   count             = var.deploy_fortigate ? 1 : 0
   subnet_id         = aws_subnet.sdwan_trust.id
@@ -161,19 +165,18 @@ resource "aws_instance" "fortigate" {
   instance_type = var.fortigate_instance_type
   key_name      = var.key_pair_name
 
-  # Primary interface = untrust (port1)
   network_interface {
     device_index         = 0
     network_interface_id = aws_network_interface.fortigate_untrust[0].id
   }
 
-  # Secondary interface = trust (port2)
   network_interface {
     device_index         = 1
     network_interface_id = aws_network_interface.fortigate_trust[0].id
   }
 
-  # Bootstrap: set admin password, mgmt ports, hostname
+  # Bootstrap: set admin password, mgmt ports, hostname.
+  # License applied manually via GUI after first login (FortiFlex token).
   user_data = base64encode(<<-EOF
     config system global
       set hostname "lab-fortigate"

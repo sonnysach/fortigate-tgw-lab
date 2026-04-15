@@ -1,9 +1,9 @@
 ##############################################################################
-# test_instances.tf – Test EC2s in spokes + simulated DC in SDWAN trust subnet
+# test_instances.tf - Test EC2s in spokes + simulated DC in SDWAN trust subnet
 ##############################################################################
 
 ###############################################################################
-# Security Group – Test EC2s (SSH from allowed CIDRs + ICMP internal)
+# Security Group - Test EC2s (SSH from allowed CIDRs + ICMP from anywhere)
 ###############################################################################
 resource "aws_security_group" "test_ec2" {
   for_each = {
@@ -24,11 +24,11 @@ resource "aws_security_group" "test_ec2" {
   }
 
   ingress {
-    description = "ICMP from RFC1918"
+    description = "ICMP from anywhere"
     from_port   = -1
     to_port     = -1
     protocol    = "icmp"
-    cidr_blocks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
@@ -64,11 +64,11 @@ resource "aws_security_group" "fake_dc" {
   }
 
   ingress {
-    description = "ICMP from RFC1918"
+    description = "ICMP from anywhere"
     from_port   = -1
     to_port     = -1
     protocol    = "icmp"
-    cidr_blocks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
@@ -90,7 +90,7 @@ resource "aws_security_group" "fake_dc" {
 }
 
 ###############################################################################
-# User Data – install iputils
+# User Data - install iputils
 ###############################################################################
 locals {
   test_userdata = <<-EOF
@@ -100,7 +100,7 @@ locals {
 }
 
 ###############################################################################
-# Test EC2 – Spoke 1
+# Test EC2 - Spoke 1
 ###############################################################################
 resource "aws_instance" "spoke1_test" {
   ami                    = data.aws_ami.amazon_linux.id
@@ -114,7 +114,7 @@ resource "aws_instance" "spoke1_test" {
 }
 
 ###############################################################################
-# Test EC2 – Spoke 2
+# Test EC2 - Spoke 2
 ###############################################################################
 resource "aws_instance" "spoke2_test" {
   ami                    = data.aws_ami.amazon_linux.id
@@ -128,7 +128,7 @@ resource "aws_instance" "spoke2_test" {
 }
 
 ###############################################################################
-# Test EC2 – Simulated DC (SDWAN trust subnet)
+# Test EC2 - Simulated DC (SDWAN trust subnet)
 ###############################################################################
 resource "aws_instance" "fake_dc" {
   ami                    = data.aws_ami.amazon_linux.id

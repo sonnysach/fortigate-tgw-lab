@@ -1,22 +1,56 @@
 # ===========================================================================
-# FortiGate CLI commands – paste AFTER terraform apply
+# FortiGate CLI commands - paste AFTER terraform apply
 # ===========================================================================
-# Replace the placeholder values with actual outputs from:
-#   terraform output -json
+# PREREQUISITES (one-time):
+#   1. License the FortiGate via GUI BEFORE pasting this file.
+#      Browse to https://<mgmt-eip>:8443, log in, then:
+#      System -> FortiGuard -> register with FortiCloud -> paste FortiFlex token
+#      Some BGP features are gated in eval mode; license first to avoid
+#      confusing "feature not licensed" errors mid-paste.
+#   2. SSH into the FortiGate (more reliable than GUI CLI for large pastes):
+#      ssh -p 2222 admin@<mgmt-eip>
 #
-# Values you need:
-#   PEER1_TGW_IP   = tgw_connect_peer1_tgw_address
-#   PEER2_TGW_IP   = tgw_connect_peer2_tgw_address
-#   FGT_TRUST_IP   = fortigate_trust_private_ip
-#   TGW_ASN        = tgw_amazon_side_asn  (default 64512)
-#   FGT_ASN        = 65000
+# Replace the <PLACEHOLDER> values below with actual values from:
+#   terraform output -json                  (FGT_TRUST_IP, PEER1/2_TGW_IP)
+#   AWS console (see CRITICAL note below)   (P1/P2 inner IPs)
 #
-# Inside tunnel IPs (from the /29 blocks):
-#   Peer 1: FortiGate = 169.254.100.2, TGW = 169.254.100.1
-#   Peer 2: FortiGate = 169.254.200.2, TGW = 169.254.200.1
+# Values from terraform outputs:
+#   <FGT_TRUST_IP>    = fortigate_trust_private_ip
+#   <PEER1_TGW_IP>    = tgw_connect_peer1_tgw_address  (GRE transport outer)
+#   <PEER2_TGW_IP>    = tgw_connect_peer2_tgw_address  (GRE transport outer)
+#   <TRUST_GW>        = .1 of the SDWAN trust subnet   (e.g. 10.10.2.1)
+#   TGW_ASN           = 64512  (hardcoded in Terraform)
+#   FGT_ASN           = 65000  (hardcoded in Terraform)
+#
+# ---------------------------------------------------------------------------
+# CRITICAL: GRE inner tunnel IPs are AWS-ASSIGNED, NOT predictable.
+# You MUST look them up before pasting this file.
+#
+# AWS Console -> VPC -> Transit Gateway Attachments -> your Connect attachment
+#   -> "Connect peers" tab. For each of the two Connect peers, note:
+#
+#     Peer BGP address          = the FortiGate inner IP for this tunnel
+#     Transit gateway BGP 1     = first TGW inner IP (BGP neighbor)
+#     Transit gateway BGP 2     = second TGW inner IP (BGP neighbor)
+#
+# TGW Connect uses TWO BGP sessions per peer for HA, so you end up with
+# 4 BGP neighbors total (2 per GRE tunnel).
+#
+# Placeholders:
+#   Peer 1 /29 (e.g. 169.254.100.0/29):
+#     <P1_FGT_IP>   = FortiGate inner IP on tunnel 1
+#     <P1_TGW_BGP1> = TGW BGP neighbor 1 on tunnel 1
+#     <P1_TGW_BGP2> = TGW BGP neighbor 2 on tunnel 1
+#   Peer 2 /29 (e.g. 169.254.200.0/29):
+#     <P2_FGT_IP>   = FortiGate inner IP on tunnel 2
+#     <P2_TGW_BGP1> = TGW BGP neighbor 1 on tunnel 2
+#     <P2_TGW_BGP2> = TGW BGP neighbor 2 on tunnel 2
+#
+# Paste in order top to bottom. Do NOT paste the whole file at once if you
+# want to verify each section; paste block by block and check for errors.
 # ===========================================================================
 
-# ── GRE Tunnel 1 (to TGW Connect Peer 1) ─────────────────────────────────
+# -- GRE Tunnel 1 (to TGW Connect Peer 1) ---------------------------------
 config system gre-tunnel
   edit "tgw-gre1"
     set interface "port2"
@@ -27,14 +61,13 @@ end
 
 config system interface
   edit "tgw-gre1"
-    set ip 169.254.100.2 255.255.255.248
+    set ip <P1_FGT_IP> 255.255.255.255
+    set remote-ip <P1_TGW_BGP1> 255.255.255.248
     set allowaccess ping
-    set mtu-override enable
-    set mtu 1436
   next
 end
 
-# ── GRE Tunnel 2 (to TGW Connect Peer 2) ─────────────────────────────────
+# -- GRE Tunnel 2 (to TGW Connect Peer 2) ---------------------------------
 config system gre-tunnel
   edit "tgw-gre2"
     set interface "port2"
@@ -45,14 +78,26 @@ end
 
 config system interface
   edit "tgw-gre2"
-    set ip 169.254.200.2 255.255.255.248
+    set ip <P2_FGT_IP> 255.255.255.255
+    set remote-ip <P2_TGW_BGP1> 255.255.255.248
     set allowaccess ping
-    set mtu-override enable
-    set mtu 1436
   next
 end
 
-# ── BGP Configuration ────────────────────────────────────────────────────
+# -- Loopback for simulated DC CIDR (BGP needs this to advertise) ---------
+# NOTE: 'set vdom "root"' is required on VDOM-enabled FortiGates.
+config system interface
+  edit "sim-dc-lo"
+    set vdom "root"
+    set type loopback
+    set ip 10.100.0.1 255.255.0.0
+    set allowaccess ping
+    set status up
+  next
+end
+
+# -- BGP Configuration ----------------------------------------------------
+# 4 neighbors total: 2 TGW BGP addresses per Connect peer (HA).
 config router bgp
   set as 65000
   set router-id <FGT_TRUST_IP>
@@ -60,12 +105,22 @@ config router bgp
   set graceful-restart enable
 
   config neighbor
-    edit "169.254.100.1"
+    edit "<P1_TGW_BGP1>"
       set remote-as 64512
       set ebgp-enforce-multihop enable
       set soft-reconfiguration enable
     next
-    edit "169.254.200.1"
+    edit "<P1_TGW_BGP2>"
+      set remote-as 64512
+      set ebgp-enforce-multihop enable
+      set soft-reconfiguration enable
+    next
+    edit "<P2_TGW_BGP1>"
+      set remote-as 64512
+      set ebgp-enforce-multihop enable
+      set soft-reconfiguration enable
+    next
+    edit "<P2_TGW_BGP2>"
       set remote-as 64512
       set ebgp-enforce-multihop enable
       set soft-reconfiguration enable
@@ -86,31 +141,15 @@ config router bgp
   end
 end
 
-# ── Loopback for simulated DC CIDR (so BGP has a route to advertise) ─────
-config system interface
-  edit "sim-dc-lo"
-    set type loopback
-    set ip 10.100.0.1 255.255.0.0
-    set allowaccess ping
-    set status up
-  next
-end
-
-# ── Static route to keep trust-side traffic flowing ──────────────────────
-config router static
-  edit 1
-    set dst 10.0.0.0 255.0.0.0
-    set gateway 10.10.2.1
-    set device "port2"
-  next
-end
-
-# ── Firewall policies (allow lab traffic) ────────────────────────────────
+# -- Firewall policies (allow lab traffic) --------------------------------
+# Four directional policies between trust and the GRE tunnels, plus two
+# more between the GRE tunnels and the loopback (so the FortiGate can
+# reply to pings/connections to its sim-DC loopback).
 config firewall policy
   edit 1
-    set name "trust-to-gre"
+    set name "trust-to-gre1"
     set srcintf "port2"
-    set dstintf "tgw-gre1" "tgw-gre2"
+    set dstintf "tgw-gre1"
     set srcaddr "all"
     set dstaddr "all"
     set action accept
@@ -119,9 +158,53 @@ config firewall policy
     set logtraffic all
   next
   edit 2
-    set name "gre-to-trust"
-    set srcintf "tgw-gre1" "tgw-gre2"
+    set name "trust-to-gre2"
+    set srcintf "port2"
+    set dstintf "tgw-gre2"
+    set srcaddr "all"
+    set dstaddr "all"
+    set action accept
+    set schedule "always"
+    set service "ALL"
+    set logtraffic all
+  next
+  edit 3
+    set name "gre1-to-trust"
+    set srcintf "tgw-gre1"
     set dstintf "port2"
+    set srcaddr "all"
+    set dstaddr "all"
+    set action accept
+    set schedule "always"
+    set service "ALL"
+    set logtraffic all
+  next
+  edit 4
+    set name "gre2-to-trust"
+    set srcintf "tgw-gre2"
+    set dstintf "port2"
+    set srcaddr "all"
+    set dstaddr "all"
+    set action accept
+    set schedule "always"
+    set service "ALL"
+    set logtraffic all
+  next
+  edit 5
+    set name "gre-to-loopback"
+    set srcintf "tgw-gre1" "tgw-gre2"
+    set dstintf "sim-dc-lo"
+    set srcaddr "all"
+    set dstaddr "all"
+    set action accept
+    set schedule "always"
+    set service "ALL"
+    set logtraffic all
+  next
+  edit 6
+    set name "loopback-to-gre"
+    set srcintf "sim-dc-lo"
+    set dstintf "tgw-gre1" "tgw-gre2"
     set srcaddr "all"
     set dstaddr "all"
     set action accept
@@ -132,10 +215,28 @@ config firewall policy
 end
 
 # ===========================================================================
-# Verification commands:
-#   get router info bgp summary
-#   get router info bgp network
-#   diagnose sys gre list
-#   execute ping 169.254.100.1
-#   execute ping 169.254.200.1
+# DO NOT add a 10.0.0.0/8 -> port2 static route. It will override the
+# BGP-learned routes from TGW (BGP admin distance is 20; static is 10) and
+# silently break return traffic, including replies from the sim-dc loopback
+# back to spoke EC2s. Let BGP handle east-west routing.
+# ===========================================================================
+
+# ===========================================================================
+# Verification:
+#   diagnose sys gre list                  -> both GRE tunnels visible, RX/TX moving
+#   execute ping-options source <P1_FGT_IP>
+#   execute ping <P1_TGW_BGP1>             -> should succeed
+#   execute ping <P1_TGW_BGP2>             -> should succeed
+#   execute ping-options source <P2_FGT_IP>
+#   execute ping <P2_TGW_BGP1>             -> should succeed
+#   execute ping <P2_TGW_BGP2>             -> should succeed
+#   get router info bgp summary            -> all 4 neighbors Established (30-60s)
+#   get router info routing-table bgp      -> spoke + inspection VPC routes visible
+#
+# In AWS console, the Connect peers' "Transit gateway BGP 1/2 Status" should
+# flip from Down to Up shortly after BGP establishes.
+#
+# End-to-end test (from any spoke EC2):
+#   ping 10.100.0.1                        -> FortiGate sim-DC loopback (via BGP)
+#   ping <other spoke private IP>          -> spoke-to-spoke through ANF
 # ===========================================================================

@@ -109,3 +109,9 @@ variable "budget_alert_email" {
   description = "Email address for AWS Budget alerts"
   type        = string
 }
+
+variable "fortigate_license_file" {
+  description = "Path to FortiGate BYOL .lic file"
+  type        = string
+  default     = ""
+}

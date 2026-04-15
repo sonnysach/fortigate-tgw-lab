@@ -1,9 +1,9 @@
 ##############################################################################
-# anf.tf – AWS Network Firewall (Inspection VPC)
+# anf.tf - AWS Network Firewall (Inspection VPC)
 ##############################################################################
 
 ###############################################################################
-# Firewall Policy – permissive lab rules
+# Firewall Policy - permissive lab rules
 ###############################################################################
 
 # Stateless rule group: allow all (pass everything to stateful engine)
@@ -34,7 +34,7 @@ resource "aws_networkfirewall_rule_group" "stateless_pass_all" {
   tags = { Name = "lab-stateless-pass-all" }
 }
 
-# Stateful rule group: allow ICMP + SSH between RFC1918
+# Stateful rule group: allow all ICMP + SSH between RFC1918
 resource "aws_networkfirewall_rule_group" "stateful_allow_lab" {
   capacity = 20
   name     = "lab-stateful-allow-rfc1918"
@@ -52,7 +52,7 @@ resource "aws_networkfirewall_rule_group" "stateful_allow_lab" {
 
     rules_source {
       rules_string = <<-RULES
-        pass icmp $RFC1918 any -> $RFC1918 any (msg:"Allow ICMP RFC1918"; sid:1; rev:1;)
+        pass icmp any any -> any any (msg:"Allow all ICMP"; sid:1; rev:2;)
         pass tcp $RFC1918 any -> $RFC1918 22 (msg:"Allow SSH RFC1918"; sid:2; rev:1;)
       RULES
     }
@@ -111,7 +111,7 @@ resource "aws_networkfirewall_firewall" "inspection" {
 }
 
 ###############################################################################
-# Flow Logging → CloudWatch
+# Flow Logging -> CloudWatch
 ###############################################################################
 resource "aws_cloudwatch_log_group" "anf_flow" {
   name              = "/aws/network-firewall/lab-inspection/flow"
@@ -148,7 +148,7 @@ resource "aws_networkfirewall_logging_configuration" "inspection" {
 }
 
 ###############################################################################
-# Routes: TGW subnets → ANF endpoint in same AZ
+# Routes: TGW subnets -> ANF endpoint in same AZ
 ###############################################################################
 
 # Extract VPC endpoint IDs per AZ from the firewall sync states

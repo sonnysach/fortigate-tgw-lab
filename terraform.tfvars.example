@@ -1,0 +1,11 @@
+# Set to true once you've subscribed to the FortiGate BYOL AMI on Marketplace
+deploy_fortigate = false
+
+# The EC2 key pair you created via aws ec2 create-key-pair
+key_pair_name = "lab-key"
+
+# Your public IP (run: curl https://api.ipify.org)
+allowed_mgmt_cidrs = ["1.2.3.4/32"]
+
+# Your email for AWS Budget alerts at 50% / 80% / 100% of $50/month
+budget_alert_email = "you@example.com"

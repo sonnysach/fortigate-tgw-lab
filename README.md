@@ -1,6 +1,6 @@
 # FortiGate + TGW + AWS Network Firewall Lab
 
-Deploys a FortiGate-VM in AWS with TGW Connect (GRE + BGP) and a centralized Inspection VPC running AWS Network Firewall. This guide assumes you have never used Terraform or the AWS CLI before.
+Deploys a FortiGate-VM (BYOL) in AWS with TGW Connect (GRE + BGP) and a centralized Inspection VPC running AWS Network Firewall. This guide assumes you have never used Terraform or the AWS CLI before.
 
 ---
 
@@ -59,7 +59,9 @@ Why two instead of one? Because they do completely different jobs:
 
 The mental model: **the VPC attachment moves bytes, the Connect attachment moves routes.** You need both, and you create them in that order.
 
-**Critical: you must propagate the Connect attachment into the TGW's Firewall RT.** The FortiGate learns DC routes from on-prem (over IPsec in production, or via a static loopback in this lab) and re-advertises them to the TGW over the BGP session running inside the Connect attachment. But BGP peering alone isn't enough — without propagating the Connect attachment into the TGW's Firewall RT, those advertised routes are never installed in the route table, and post-inspection return traffic to the data center silently black-holes. This is the step AWS admins most commonly miss because it's a manual click in the console (or a dedicated Terraform resource), not something that happens automatically when BGP comes up. The VPC (transport) attachment does not need to be propagated — it only carries GRE bytes, not routes.
+**Critical: both the VPC (transport) attachment AND the Connect attachment must be associated with the SDWAN route table.** It's tempting to associate only the Connect attachment because that's where BGP runs — but the VPC attachment also needs an associated RT, otherwise traffic originated by the FortiGate's trust ENI hits TGW with no route table to consult and is silently black-holed. The current `tgw.tf` includes both associations.
+
+**Critical: you must propagate the Connect attachment into the TGW's Firewall RT.** The FortiGate learns DC routes from on-prem (over IPsec in production, or via a static loopback in this lab) and re-advertises them to the TGW over the BGP session running inside the Connect attachment. But BGP peering alone isn't enough — without propagating the Connect attachment into the TGW's Firewall RT, those advertised routes are never installed in the route table, and post-inspection return traffic to the data center silently black-holes. This is the step AWS admins most commonly miss because it's a manual click in the console (or a dedicated Terraform resource), not something that happens automatically when BGP comes up.
 
 </details>
 
@@ -80,9 +82,9 @@ The powerful consequence: the same destination IP gets forwarded completely diff
 
 The three tables:
 
-- **SDWAN RT** — associated with the Connect attachment. One static default route to the Inspection VPC attachment. Everything from the FortiGate goes through inspection.
+- **SDWAN RT** — associated with the Connect attachment AND the SDWAN VPC attachment. One static default route to the Inspection VPC attachment. Everything from the FortiGate (whether arriving via the GRE tunnel from on-prem or originated by the trust ENI) goes through inspection.
 - **Spoke RT** — associated with both spoke VPC attachments. One static default route to the Inspection VPC attachment. Spoke CIDRs are deliberately *not* propagated here — if they were, longest-prefix-match would beat the default and spoke-to-spoke traffic would bypass ANF.
-- **Firewall RT** — associated with the Inspection VPC attachment. This is the only "smart" table. After ANF inspects a packet, the Firewall RT decides where it goes: to a spoke (propagated routes) or back to the FortiGate (DC CIDR learned via BGP). No static routes needed.
+- **Firewall RT** — associated with the Inspection VPC attachment. This is the only "smart" table. After ANF inspects a packet, the Firewall RT decides where it goes: to a spoke (propagated routes), to the FortiGate (DC CIDR learned via BGP through the Connect attachment), or to the SDWAN VPC trust subnet (propagated). No static routes needed.
 
 The design pattern: **"dumb ingress tables + one smart post-inspection table."** Topology belongs in propagation, policy belongs in static routes.
 
@@ -99,6 +101,7 @@ The design pattern: **"dumb ingress tables + one smart post-inspection table."**
 This is the north-south flow the customer cares about most. Watch the animation above, then read the summary below.
 
 **The short version:**
+
 ```
 Forward: Simulated DC → FortiGate → TGW (SDWAN RT) → ANF → TGW (Firewall RT) → Spoke 1 EC2
 Return:  Spoke 1 EC2 → TGW (Spoke RT) → ANF → TGW (Firewall RT) → FortiGate → Simulated DC
@@ -231,6 +234,8 @@ export AWS_PROFILE=lab
 ```
 
 > **Windows PowerShell users:** Use `$env:AWS_PROFILE = "lab"` instead.
+>
+> **Make it permanent on macOS/Linux:** add `export AWS_PROFILE=lab` to your `~/.zshrc` (or `~/.bashrc`) so every new terminal session has it set automatically. SSO tokens expire after ~8 hours and you'll re-run `aws sso login` periodically, but `AWS_PROFILE` will already be set.
 
 ### Option B: IAM access keys — personal accounts or non-SSO setups
 
@@ -302,11 +307,15 @@ Keep this file safe — you'll need it to SSH into instances later. Don't share 
 
 Terraform needs permission to launch the FortiGate AMI. This is a one-time step per AWS account.
 
-1. Open https://aws.amazon.com/marketplace/pp/prodview-wory773oau6wq
+This lab uses the **BYOL** (Bring Your Own License) FortiGate-VM AMI. The AMI name filter in `fortigate.tf` is `FortiGate-VM64-AWS build*7.4*` which matches the BYOL listing.
+
+1. Open the FortiGate-VM **BYOL** listing: https://aws.amazon.com/marketplace/pp/prodview-wory773oau6wq
 2. Click **"View purchase options"** or **"Try for free"**
 3. Accept the terms and subscribe (you won't be charged until you launch an instance)
 
-> **Note:** If your work account restricts Marketplace subscriptions, ask your AWS admin to approve it, or request a BYOL license from our internal team. Set `deploy_fortigate = false` in `terraform.tfvars` to deploy everything else while you wait.
+> **Note on PAYG:** If you'd rather use the PAYG (pay-as-you-go) FortiGate AMI instead of BYOL, subscribe to the PAYG listing on Marketplace and change the `fortigate.tf` AMI name filter to `FortiGate-VM64-AWSONDEMAND build*7.4*`. PAYG includes the license cost in the per-hour EC2 rate (~$0.50/hr for a c5.large) and doesn't require a FortiFlex token.
+>
+> **If your work account restricts Marketplace subscriptions:** ask your AWS admin to approve it. You can also set `deploy_fortigate = false` in `terraform.tfvars` to deploy everything except the FortiGate while you wait.
 
 </details>
 
@@ -316,7 +325,7 @@ Terraform needs permission to launch the FortiGate AMI. This is a one-time step 
 The lab locks down SSH and management access to your IP address only. Run:
 
 ```bash
-curl ifconfig.me
+curl https://api.ipify.org; echo
 ```
 
 This prints your public IP (e.g., `203.0.113.42`). Write it down — you'll need it in the next step.
@@ -328,10 +337,10 @@ This prints your public IP (e.g., `203.0.113.42`). Write it down — you'll need
 <details>
 <summary><b>Step 5: Edit terraform.tfvars</b></summary>
 
-Open the file `terraform.tfvars` in any text editor and replace the three `CHANGE_ME` values:
+Open the file `terraform.tfvars` in any text editor and replace the four `CHANGE_ME` values:
 
 ```hcl
-# Set to true once you have the FortiGate BYOL license and Marketplace sub
+# Set to true once you have the FortiGate BYOL Marketplace subscription approved
 deploy_fortigate = false
 
 # The key pair name you created in Step 2
@@ -341,7 +350,7 @@ key_pair_name = "lab-key"
 allowed_mgmt_cidrs = ["203.0.113.42/32"]
 
 # Your email for AWS budget alerts (50%, 80%, 100% of $50/month)
-budget_alert_email = "you@fortinet.com"
+budget_alert_email = "you@example.com"
 ```
 
 Save the file.
@@ -397,37 +406,138 @@ terraform output -json
 Once deployed, SSH into the spoke test EC2s using the key you created:
 
 ```bash
-ssh -i lab-key.pem ec2-user@<spoke1_public_ip>
+ssh -i lab-key.pem ec2-user@SPOKE1_PUBLIC_IP
 ```
 
-(Replace `<spoke1_public_ip>` with the actual IP from the Terraform output.)
+(Replace `SPOKE1_PUBLIC_IP` with the actual IP from the Terraform output.)
 
 From inside the spoke1 EC2, try pinging spoke2's private IP:
 
 ```bash
-ping 10.2.1.x
+ping SPOKE2_PRIVATE_IP
 ```
 
-If `deploy_fortigate = true` and you've configured BGP (Step 8), also try pinging the simulated DC:
-
-```bash
-ping 10.100.0.1
-```
+Pings should succeed — every packet is traversing ANF in both directions. (If `deploy_fortigate = true` and you've completed Step 8, you can also ping `10.100.0.1` to reach the FortiGate's simulated DC loopback.)
 
 </details>
 
 <details>
 <summary><b>Step 8: Configure FortiGate GRE + BGP (only when deploy_fortigate = true)</b></summary>
 
-This step is manual — Terraform sets up the EC2 instance but the GRE/BGP config needs to be pasted into the FortiGate CLI.
+This step is manual — Terraform brings up the FortiGate-VM but the GRE/BGP/policy configuration must be pasted into the FortiGate CLI by hand. This is intentional: it's the most important hands-on exercise in the lab.
 
-1. Log into FortiGate at the URL shown in `fortigate_mgmt_url` output (port 8443)
-2. Username: `admin`, Password: from `terraform output fortigate_admin_password`
-3. Open the CLI console (or SSH on port 2222)
-4. Open the file `fortigate-cli.txt` in this repo
-5. Replace the `<PLACEHOLDER>` values with the actual IPs from `terraform output -json`
-6. Paste the commands into the FortiGate CLI
-7. Verify BGP is up: `get router info bgp summary`
+### 8.1 — License the FortiGate
+
+The BYOL FortiGate boots in evaluation mode (limited throughput, ~15-day timer, some BGP features gated). License it BEFORE pasting any CLI:
+
+1. Browse to the URL from `terraform output fortigate_mgmt_url` (port 8443)
+2. Username: `admin`, password from `terraform output -raw fortigate_admin_password`
+3. FortiOS will force a password change on first login
+4. **System → FortiGuard → FortiCare Support** (or **System → Firmware & Registration** depending on FortiOS version)
+5. Register with your FortiCloud account, then paste your **FortiFlex token**
+6. The unit pulls down its entitlement and licenses itself; reboot if prompted
+
+### 8.2 — Look up TGW Connect inner IPs in the AWS console
+
+This step is critical and frequently missed. **The GRE inner tunnel IPs are AWS-assigned, not predictable.** You cannot use `.1` and `.2` as the inner IPs even though that pattern looks natural.
+
+1. AWS Console → **VPC** → **Transit Gateway Attachments** → click your Connect attachment
+2. **Connect peers** tab → for each of the two peers, note:
+   - **Peer BGP address** = the FortiGate inner IP for this tunnel (use this as the `set ip` on the GRE interface)
+   - **Transit gateway BGP 1 address** = first TGW inner IP (BGP neighbor #1 for this tunnel)
+   - **Transit gateway BGP 2 address** = second TGW inner IP (BGP neighbor #2 for this tunnel)
+
+TGW Connect uses **two BGP sessions per peer** for HA, so you end up with **4 BGP neighbors total** (2 per GRE tunnel). The `fortigate-cli.txt` template reflects this.
+
+### 8.3 — Edit and paste the CLI
+
+1. Open `fortigate-cli.txt` in this repo
+2. Replace every `<PLACEHOLDER>` value with the corresponding value from `terraform output -json` (transport IPs, FortiGate trust IP) and from the AWS console lookup in step 8.2 (inner IPs)
+3. SSH to the FortiGate (more reliable than the GUI CLI for large pastes):
+
+   ```bash
+   ssh -p 2222 admin@FORTIGATE_MGMT_EIP
+   ```
+
+4. Paste the file contents block by block, watching for errors
+
+### 8.4 — Verify
+
+```
+get router info bgp summary
+diagnose sys gre list
+get router info routing-table bgp
+```
+
+- `get router info bgp summary` — all 4 neighbors should reach Established
+- `diagnose sys gre list` — both GRE tunnels visible, RX/TX moving
+- `get router info routing-table bgp` — spoke + inspection routes via BGP
+
+In AWS Console, the Connect peers' "Transit gateway BGP 1/2 Status" should flip from Down to Up shortly after BGP establishes.
+
+### 8.5 — Critical: do NOT add a 10.0.0.0/8 static route
+
+Earlier versions of `fortigate-cli.txt` included a `set dst 10.0.0.0/8 → port2` static route as a workaround. **Do not add it.** Static routes (admin distance 10) override BGP-learned routes (admin distance 20), which silently breaks return traffic from the FortiGate's sim-DC loopback back to the spokes. The current `fortigate-cli.txt` template omits this route deliberately. Let BGP handle east-west routing.
+
+</details>
+
+<details>
+<summary><b>Step 8b: Validate East-West Inspection in CloudWatch</b></summary>
+
+Once GRE+BGP is up (or even just east-west spoke traffic works without the FortiGate path), prove that traffic actually traverses ANF in both directions.
+
+### Generate test traffic
+
+SSH into spoke1 and ping spoke2:
+
+```bash
+ssh -i lab-key.pem ec2-user@SPOKE1_PUBLIC_IP
+ping -c 30 SPOKE2_PRIVATE_IP
+```
+
+### Query the ANF flow logs
+
+1. AWS Console → **CloudWatch** → **Log Management** → search `network-firewall`
+2. Open the log group ending in `/flow`
+3. Click **View in Logs Insights**
+4. Set time range to **15m** (top right)
+5. Paste this query and click **Run**:
+
+```
+fields @timestamp, event.src_ip, event.dest_ip, event.proto, event.netflow.pkts, event.netflow.bytes
+| filter event.proto = "ICMP"
+   and (event.src_ip like /^10\./ and event.dest_ip like /^10\./)
+| sort @timestamp desc
+| limit 100
+```
+
+You should see **two rows per ping flow** — one for the echo-request (spoke1 → spoke2) and one for the echo-reply (spoke2 → spoke1) with matching packet counts. Both directions appearing is your proof that:
+
+1. The TGW multi-RT design is forcing east-west traffic through ANF
+2. Appliance mode on the Inspection attachment is keeping the return path symmetric
+3. ANF stateful inspection is allowing the traffic per the permissive lab policy
+
+For a slide-friendly aggregated view:
+
+```
+fields event.src_ip, event.dest_ip, event.proto
+| filter event.proto = "ICMP"
+   and (event.src_ip like /^10\./ and event.dest_ip like /^10\./)
+| stats sum(event.netflow.pkts) as packets, sum(event.netflow.bytes) as bytes by event.src_ip, event.dest_ip
+| sort packets desc
+```
+
+### Visualize the path
+
+For a topology diagram showing every TGW route table lookup and ANF endpoint hop:
+
+1. AWS Console → **VPC** → **Reachability Analyzer**
+2. Source: spoke1 EC2, Destination: spoke2 EC2, Protocol: ICMP
+3. Create and analyze (~30s, costs $0.10)
+
+The result is a clickable hop-by-hop diagram proving traffic transits the Inspection VPC. Screenshot-worthy for customer demos.
+
+> **Why traceroute doesn't work the way you'd expect:** TGW and ANF deliberately don't decrement TTL or generate ICMP time-exceeded responses, so they're invisible to `traceroute`. Use Reachability Analyzer for path visualization, not traceroute.
 
 </details>
 
@@ -451,15 +561,21 @@ Type **yes** when prompted. This removes all AWS resources created by this confi
 
 **"command not found: terraform"** — Terraform isn't installed or isn't on your PATH. Reinstall per Step 0 and open a new terminal window.
 
-**"Error: No valid credential sources found"** — Your AWS session expired. Run `aws sso login --profile fortinet-lab` again and make sure `AWS_PROFILE` is set.
+**"Error: No valid credential sources found"** — Your AWS session expired. Run `aws sso login --profile lab` again and make sure `AWS_PROFILE=lab` is set in your shell. SSO tokens expire after ~8 hours.
 
 **"Error: creating EC2 Instance: OptInRequired"** — You haven't subscribed to the FortiGate AMI in Marketplace. Complete Step 3, or set `deploy_fortigate = false`.
 
 **"Error: UnauthorizedAccess"** — Your SSO role may not have sufficient permissions. Contact your AWS admin.
 
-**"terraform plan" shows changes you didn't expect** — Someone else may have modified resources manually in the console. Run `terraform apply` to reconcile, or `terraform destroy` and start fresh.
+**"terraform plan" shows changes you didn't expect** — Someone else may have modified resources manually in the console. Run `terraform apply -refresh-only` to sync state, then `terraform plan` again to see only the changes you intend.
 
 **Can't SSH into test EC2** — Check that your current public IP matches what's in `allowed_mgmt_cidrs`. If you switched networks or VPN, your IP changed. Update `terraform.tfvars` and run `terraform apply`.
+
+**FortiGate GUI loads but won't accept your password** — On first login, FortiOS forces a password change. The Terraform-output password is the bootstrap value; once you've changed it, that output is stale. If you've forgotten the changed password, the easiest fix is `terraform taint random_password.fortigate_admin[0] && terraform apply` to regenerate (which rebuilds the FortiGate too).
+
+**FortiGate licensed but BGP neighbors stuck in Connect/Active state** — The FortiGate inner IPs configured don't match what AWS assigned. Re-check AWS Console → TGW Attachments → Connect peers and update the FortiGate GRE interface IPs and BGP neighbor addresses to match. See Step 8.2.
+
+**Spoke-to-spoke ping works but no entries appear in ANF flow logs** — Wait 2-3 minutes (flow log ingestion delay), bump the Logs Insights time range to 15m or 30m, and re-run the query.
 
 </details>
 
@@ -474,20 +590,73 @@ Type **yes** when prompted. This removes all AWS resources created by this confi
 ---
 
 <details>
+<summary><b>Known Issues & Lessons Learned</b></summary>
+
+Hard-won lessons from building this lab. Keep these in mind when adapting the design for customers.
+
+### The SDWAN VPC TGW attachment must be associated with a route table
+
+Easy to miss because the design is often described as "the SDWAN RT is associated with the Connect attachment" — but the **VPC (transport) attachment** ALSO needs to be associated with the SDWAN RT. Without this, traffic originated by the FortiGate's trust ENI hits TGW on the SDWAN VPC attachment, finds no associated route table, and is silently black-holed (no error, no log, just dropped). The current `tgw.tf` includes both associations:
+
+```hcl
+aws_ec2_transit_gateway_route_table_association.connect      # Connect attachment → SDWAN RT
+aws_ec2_transit_gateway_route_table_association.sdwan_vpc    # SDWAN VPC attachment → SDWAN RT  ← easy to forget
+```
+
+Symptom if you forget it: spoke-to-FortiGate traffic works in the forward direction (spoke RT sends it to Inspection, Firewall RT forwards to Connect attachment), but the FortiGate's reply enters TGW on the unassociated VPC attachment and dies. From the spoke, this looks like a one-way ping with no replies.
+
+### TGW Connect inner IPs are AWS-assigned
+
+The /29 you specify in the Connect peer config (e.g. `169.254.100.0/29`) gives AWS the address space, but AWS picks which addresses go where. Don't hardcode `.1` and `.2` in the FortiGate CLI — look them up in the AWS console under TGW Attachments → Connect peers tab. Step 8.2 above walks through this.
+
+### FortiGate sim-DC loopback ping has additional requirements
+
+Pinging `10.100.0.1` (the FortiGate's sim-DC loopback) from a spoke EC2 requires:
+
+1. ANF allows ICMP (default policy ✓)
+2. TGW route tables forward east-west correctly (architectural design ✓)
+3. **FortiGate firewall policies allow GRE → loopback** (added to current `fortigate-cli.txt`)
+4. **FortiGate has return route to spoke CIDRs via BGP** (works only if no overriding static — see Step 8.5)
+
+If the loopback ping fails after Step 8, sniff on the FortiGate to isolate which leg is failing:
+
+```
+diagnose sniffer packet any 'host 10.100.0.1' 4
+```
+
+Echo-requests visible but no replies = FortiGate-side problem (policy or routing). No packets at all = upstream (TGW or ANF).
+
+### Asymmetric or one-way ANF flow logs indicate appliance mode is off
+
+If you see ICMP echo-requests in CloudWatch but not echo-replies (or vice versa), check that the Inspection VPC TGW attachment has `appliance_mode_support = "enable"`. Without it, the return half of a flow may hash to a different AZ's ANF endpoint, miss the stateful flow record, and get dropped. This is the #1 production failure mode of this design.
+
+### CloudShell session and SSO tokens expire mid-workflow
+
+`aws sso login` tokens last ~8 hours by default. If `terraform plan` suddenly errors with "no valid credential sources" mid-session, refresh with `aws sso login --profile lab` and confirm `AWS_PROFILE=lab` is exported.
+
+</details>
+
+---
+
+<details>
 <summary><b>File Reference</b></summary>
 
 | File | What it does |
 |------|-------------|
+| `README.md` | This file — setup guide, design walkthrough, troubleshooting, lessons learned |
 | `versions.tf` | Tells Terraform which AWS provider version to use |
 | `variables.tf` | Defines all configurable inputs (CIDRs, instance types, etc.) |
 | `vpc.tf` | Creates the 4 VPCs, their subnets, internet gateways, and route tables |
 | `tgw.tf` | Creates the Transit Gateway, VPC attachments, Connect (GRE), and 3 route tables |
-| `fortigate.tf` | Creates the FortiGate-VM EC2 instance, network interfaces, and security groups |
-| `anf.tf` | Creates AWS Network Firewall with inspection policy and CloudWatch flow logs |
+| `fortigate.tf` | Creates the FortiGate-VM EC2 instance, network interfaces, and security groups (BYOL AMI) |
+| `anf.tf` | Creates AWS Network Firewall with permissive inspection policy and CloudWatch flow logs |
 | `test_instances.tf` | Creates t3.micro test EC2s in each spoke VPC and the simulated DC in SDWAN VPC |
-| `budget.tf` | Creates a $50/month AWS Budget with email alerts |
+| `budget.tf` | Creates a $50/month AWS Budget with email alerts at 50%/80%/100% |
 | `outputs.tf` | Displays IP addresses, SSH commands, and other info after deployment |
-| `terraform.tfvars` | **Your config file** — edit this with your key pair, IP, and email |
-| `fortigate-cli.txt` | GRE + BGP CLI commands to paste into the FortiGate after deployment |
+| `terraform.tfvars` | **Your config file** — edit this with your key pair, IP, and email (gitignored) |
+| `terraform.tfvars.example` | Template showing what values to put in `terraform.tfvars` |
+| `fortigate-cli.txt` | Template with `<PLACEHOLDER>` values for GRE+BGP+policy CLI to paste post-deploy |
+| `packet_walk.gif` / `.mp4` | Animated visualization of the north-south packet path |
+| `route_tables.gif` / `.mp4` | Animated visualization of the three TGW route tables |
 
 </details>
