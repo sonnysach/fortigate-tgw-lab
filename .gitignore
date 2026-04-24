@@ -7,5 +7,6 @@
 
 # Sensitive files — never commit these
 *.pem
+terraform.tfvars
 override.tf
 override.tf.json
